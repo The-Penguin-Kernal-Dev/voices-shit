@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice Activated Avatar</title>
+<style>
+  body, html {
+    margin: 0; padding: 0; height: 100%; background: #111; display: flex; justify-content: center; align-items: center;
+  }
+  img {
+    max-width: 100vw;
+    max-height: 100vh;
+  }
+</style>
+</head>
+<body>
+<img id="avatar" src="https://i.ibb.co/chqZCvGC/idle.png" alt="Avatar" />
+<script>
+const avatar = document.getElementById('avatar');
+const idleImg = "https://i.ibb.co/chqZCvGC/idle.png";
+const talkingImg = "https://i.ibb.co/Jw5PDXWp/talking.png";
+
+navigator.mediaDevices.getUserMedia({ audio: true })
+  .then(stream => {
+    const audioContext = new AudioContext();
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    source.connect(analyser);
+    analyser.fftSize = 512;
+
+    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+    let smoothing = 0;
+    const smoothingFactor = 0.8;
+    const threshold = 40;
+    let silentFrames = 0;
+    const silentFramesThreshold = 10;
+
+    function detectVoice() {
+      analyser.getByteFrequencyData(dataArray);
+      let sum = 0;
+      for (let i = 0; i < dataArray.length; i++) {
+        sum += dataArray[i];
+      }
+      const average = sum / dataArray.length;
+
+      smoothing = smoothing * smoothingFactor + average * (1 - smoothingFactor);
+
+      if (smoothing > threshold) {
+        avatar.src = talkingImg;
+        silentFrames = 0;
+      } else {
+        silentFrames++;
+        if (silentFrames > silentFramesThreshold) {
+          avatar.src = idleImg;
+        }
+      }
+
+      requestAnimationFrame(detectVoice);
+    }
+
+    detectVoice();
+  })
+  .catch(err => {
+    console.error('Microphone access denied or error:', err);
+  });
+</script>
+</body>
+</html>
