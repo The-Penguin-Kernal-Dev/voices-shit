@@ -1,169 +1,182 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Voice Activated Avatar</title>
 <style>
   body, html {
-    margin: 0; 
-    padding: 0; 
-    height: 100%; 
-    background: #111;
-    display: flex;
-    justify-content: center;
+    margin: 0; padding: 0; height: 100%; 
+    background: #111; 
+    display: flex; 
+    justify-content: center; 
     align-items: center;
     overflow: hidden;
   }
-
   .avatar-container {
     position: relative;
-    width: min(90vmin, 600px);
-    height: min(90vmin, 600px);
+    width: 100vmin;
+    height: 100vmin;
   }
-
   .avatar-image {
     position: absolute;
+    top: 0;
+    left: 0;
     width: 100%;
     height: 100%;
     object-fit: contain;
     opacity: 0;
-    transition: opacity 0.2s ease-in-out;
+    transition: opacity 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+    will-change: opacity;
   }
-
   .active {
     opacity: 1;
   }
-
-  #permissionPrompt {
+  #error {
+    display: none;
     position: fixed;
     top: 20px;
     color: white;
-    background: #333;
+    background: #c00;
     padding: 15px;
-    border-radius: 8px;
-    display: none;
+    border-radius: 5px;
+    max-width: 80%;
+    text-align: center;
   }
 </style>
 </head>
 <body>
   <div class="avatar-container">
-    <img id="idleAvatar" class="avatar-image active" src="https://i.ibb.co/chqZCvGC/idle.png" alt="Idle Avatar">
-    <img id="talkingAvatar" class="avatar-image" src="https://i.ibb.co/Jw5PDXWp/talking.png" alt="Talking Avatar">
+    <img id="idleAvatar" class="avatar-image active" src="https://i.ibb.co/chqZCvGC/idle.png" alt="Idle Avatar" />
+    <img id="talkingAvatar" class="avatar-image" src="https://i.ibb.co/Jw5PDXWp/talking.png" alt="Talking Avatar" />
   </div>
-  <div id="permissionPrompt">Click anywhere to enable microphone</div>
+  <div id="error"></div>
 
 <script>
-class VoiceAvatar {
-  constructor() {
-    this.idleImg = document.getElementById('idleAvatar');
-    this.talkingImg = document.getElementById('talkingAvatar');
-    this.permissionPrompt = document.getElementById('permissionPrompt');
-    
-    this.audioContext = null;
-    this.analyser = null;
-    this.isTalking = false;
-    this.silentFrames = 0;
-    
-    this.init();
-  }
+// Configuration
+const AUDIO_CONFIG = {
+  FFT_SIZE: 1024,          // Reduced for faster processing
+  SAMPLE_RATE: 44100,
+  SMOOTHING_FACTOR: 0.65,  // Faster response to changes
+  RMS_THRESHOLD: 0.025,    // Adjusted threshold
+  SILENT_FRAMES_THRESHOLD: 4, // Faster state reversion
+  MIN_VOICE_DURATION: 40   // Reduced minimum duration
+};
 
-  async init() {
-    this.preloadImages();
-    this.showPermissionPrompt();
-    this.addEventListeners();
-  }
+// State management
+let currentState = 'idle';
+let lastStateChange = 0;
+let mediaStream = null;
+let audioContext = null;
+let analyser = null;
+let animationFrameId = null;
 
-  preloadImages() {
-    new Image().src = this.idleImg.src;
-    new Image().src = this.talkingImg.src;
-  }
+const idleAvatar = document.getElementById('idleAvatar');
+const talkingAvatar = document.getElementById('talkingAvatar');
+const errorDiv = document.getElementById('error');
 
-  showPermissionPrompt() {
-    if (location.protocol === 'https:') {
-      this.permissionPrompt.style.display = 'block';
-    }
-  }
+// Preload images and warm-up transitions
+function preloadAndPrepare() {
+  const preloader = new Image();
+  preloader.src = talkingAvatar.src;
+  preloader.onload = () => {
+    idleAvatar.style.contentVisibility = 'auto';
+    talkingAvatar.style.contentVisibility = 'auto';
+  };
+}
+preloadAndPrepare();
 
-  addEventListeners() {
-    document.addEventListener('click', () => this.initializeAudio());
-    window.addEventListener('beforeunload', () => this.cleanup());
-  }
+function setAvatarState(newState) {
+  if (newState === currentState) return;
+  
+  const now = performance.now();
+  if (now - lastStateChange < AUDIO_CONFIG.MIN_VOICE_DURATION) return;
+  
+  lastStateChange = now;
+  currentState = newState;
+  
+  idleAvatar.classList.toggle('active', newState === 'idle');
+  talkingAvatar.classList.toggle('active', newState === 'talking');
+}
 
-  async initializeAudio() {
-    try {
-      this.permissionPrompt.style.display = 'none';
-      
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      this.setupAudioAnalysis(stream);
-    } catch (error) {
-      console.error('Audio access error:', error);
-      this.permissionPrompt.textContent = 'Microphone access required - please refresh and allow access';
-      this.permissionPrompt.style.display = 'block';
-    }
-  }
-
-  setupAudioAnalysis(stream) {
-    this.audioContext = new AudioContext();
-    const source = this.audioContext.createMediaStreamSource(stream);
-    
-    this.analyser = this.audioContext.createAnalyser();
-    this.analyser.fftSize = 2048;
-    source.connect(this.analyser);
-    
-    this.startAnalysis();
-  }
-
-  startAnalysis() {
-    const buffer = new Uint8Array(this.analyser.fftSize);
-    let smoothedVolume = 0;
-    
-    const processAudio = () => {
-      this.analyser.getByteTimeDomainData(buffer);
-      
-      // Calculate RMS volume
-      const rms = Math.sqrt(
-        buffer.reduce((acc, val) => acc + Math.pow(val - 128, 2), 0) / buffer.length
-      ) / 128;
-
-      // Apply exponential smoothing
-      smoothedVolume = Math.max(rms, smoothedVolume * 0.85);
-      
-      this.updateAvatarState(smoothedVolume);
-      requestAnimationFrame(processAudio);
-    };
-
-    processAudio();
-  }
-
-  updateAvatarState(volume) {
-    const THRESHOLD = 0.04;
-    const HYSTERESIS = 0.02;
-    
-    if (volume > THRESHOLD + HYSTERESIS && !this.isTalking) {
-      this.setTalkingState(true);
-    } else if (volume < THRESHOLD - HYSTERESIS && this.isTalking) {
-      this.setTalkingState(false);
-    }
-  }
-
-  setTalkingState(talking) {
-    this.isTalking = talking;
-    this.idleImg.classList.toggle('active', !talking);
-    this.talkingImg.classList.toggle('active', talking);
-  }
-
-  cleanup() {
-    if (this.audioContext) {
-      this.audioContext.close();
-    }
+async function initializeAudio() {
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({ 
+      audio: { 
+        noiseSuppression: false,
+        echoCancellation: false 
+      } 
+    });
+    setupAudioAnalysis();
+  } catch (err) {
+    showError('Microphone access required. Please allow access and refresh.');
+    console.error('Audio initialization error:', err);
   }
 }
 
-// Initialize avatar when DOM is loaded
-document.addEventListener('DOMContentLoaded', () => {
-  new VoiceAvatar();
+function setupAudioAnalysis() {
+  audioContext = new AudioContext({ latencyHint: 'interactive' });
+  const source = audioContext.createMediaStreamSource(mediaStream);
+  analyser = audioContext.createAnalyser();
+  
+  analyser.fftSize = AUDIO_CONFIG.FFT_SIZE;
+  analyser.smoothingTimeConstant = 0.4;
+  source.connect(analyser);
+  
+  const bufferLength = analyser.fftSize;
+  const dataArray = new Uint8Array(bufferLength);
+  let smoothedVolume = 0;
+
+  function processAudio() {
+    analyser.getByteTimeDomainData(dataArray);
+    
+    // Optimized RMS calculation
+    let sumSquares = 0;
+    const scale = 1 / (128 * bufferLength);
+    for (let i = 0; i < bufferLength; i += 2) { // Skip every other sample
+      const sample = dataArray[i] - 128;
+      sumSquares += sample * sample;
+    }
+    const rms = Math.sqrt(sumSquares * scale);
+    
+    // Aggressive smoothing for faster response
+    smoothedVolume = Math.max(rms, smoothedVolume * AUDIO_CONFIG.SMOOTHING_FACTOR);
+
+    // Immediate state management
+    if (smoothedVolume > AUDIO_CONFIG.RMS_THRESHOLD) {
+      setAvatarState('talking');
+    } else if (performance.now() - lastStateChange > 50) {
+      setAvatarState('idle');
+    }
+
+    animationFrameId = requestAnimationFrame(processAudio);
+  }
+
+  processAudio();
+}
+
+function showError(message) {
+  errorDiv.textContent = message;
+  errorDiv.style.display = 'block';
+}
+
+function cleanup() {
+  if (animationFrameId) cancelAnimationFrame(animationFrameId);
+  if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
+  if (audioContext) audioContext.close();
+}
+
+// User interaction handling
+window.addEventListener('click', async () => {
+  if (!mediaStream) {
+    await initializeAudio();
+  }
+  if (audioContext?.state === 'suspended') {
+    await audioContext.resume();
+  }
 });
+
+window.addEventListener('beforeunload', cleanup);
 </script>
 </body>
 </html>
