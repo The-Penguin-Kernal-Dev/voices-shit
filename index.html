@@ -1,180 +1,221 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Voice Activated Avatar</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI-Powered Voice Avatar</title>
 <style>
-  body, html {
-    margin: 0; padding: 0; height: 100%; 
-    background: #111; 
-    display: flex; 
-    justify-content: center; 
-    align-items: center;
+  :root {
+    --primary-color: #00ff88;
+    --background-color: #1a1a1a;
+  }
+
+  body {
+    margin: 0;
     overflow: hidden;
+    background: var(--background-color);
+    font-family: Arial, sans-serif;
   }
-  .avatar-container {
+
+  #container {
     position: relative;
-    width: 100vmin;
-    height: 100vmin;
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
   }
-  .avatar-image {
+
+  #visualization {
     position: absolute;
-    top: 0;
-    left: 0;
     width: 100%;
     height: 100%;
-    object-fit: contain;
-    opacity: 0;
-    transition: opacity 0.3s ease-in-out;
   }
-  .active {
-    opacity: 1;
-  }
-  #error {
-    display: none;
+
+  .control-panel {
     position: fixed;
     top: 20px;
-    color: white;
-    background: #c00;
+    right: 20px;
+    background: rgba(0, 0, 0, 0.8);
     padding: 15px;
-    border-radius: 5px;
-    max-width: 80%;
-    text-align: center;
+    border-radius: 10px;
+    color: white;
+    backdrop-filter: blur(5px);
+  }
+
+  .progress-ring {
+    position: absolute;
+    width: 110%;
+    height: 110%;
+    stroke-width: 2;
+    fill: none;
+    stroke: var(--primary-color);
+    opacity: 0.3;
   }
 </style>
 </head>
 <body>
-  <div class="avatar-container">
-    <img id="idleAvatar" class="avatar-image active" src="https://i.ibb.co/chqZCvGC/idle.png" alt="Idle Avatar" />
-    <img id="talkingAvatar" class="avatar-image" src="https://i.ibb.co/Jw5PDXWp/talking.png" alt="Talking Avatar" />
+<div id="container">
+  <canvas id="visualization"></canvas>
+  <div class="control-panel">
+    <h3>Voice Controls</h3>
+    <label>Sensitivity: <input type="range" id="sensitivity" min="0" max="1" step="0.1" value="0.5"></label>
+    <div id="status">Initializing...</div>
   </div>
-  <div id="error"></div>
+  <svg class="progress-ring">
+    <circle id="progressCircle" cx="50%" cy="50%" r="45%"/>
+  </svg>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/speech-commands@0.5.7/dist/speech-commands.min.js"></script>
 
 <script>
-const AVATAR_STATES = {
-  IDLE: 'idle',
-  TALKING: 'talking'
+const VOICE_PARAMS = {
+  SMOOTHING: 0.92,
+  MIN_DURATION: 150,
+  VOLUME_MULTIPLIER: 2.5
 };
 
-// Configuration
-const AUDIO_CONFIG = {
-  FFT_SIZE: 2048,
-  SMOOTHING_FACTOR: 0.8,
-  RMS_THRESHOLD: 0.02,
-  SILENT_FRAMES_THRESHOLD: 8,
-  MIN_VOICE_DURATION: 100 // ms
-};
-
-// State management
-let currentState = AVATAR_STATES.IDLE;
-let lastStateChange = 0;
-let mediaStream = null;
-let audioContext = null;
-let analyser = null;
-
-const idleAvatar = document.getElementById('idleAvatar');
-const talkingAvatar = document.getElementById('talkingAvatar');
-const errorDiv = document.getElementById('error');
-
-// Preload images
-new Image().src = idleAvatar.src;
-new Image().src = talkingAvatar.src;
-
-function setAvatarState(newState) {
-  if (newState === currentState) return;
-  
-  const now = Date.now();
-  if (now - lastStateChange < AUDIO_CONFIG.MIN_VOICE_DURATION) return;
-  
-  lastStateChange = now;
-  currentState = newState;
-  
-  idleAvatar.classList.toggle('active', newState === AVATAR_STATES.IDLE);
-  talkingAvatar.classList.toggle('active', newState === AVATAR_STATES.TALKING);
-}
-
-async function initializeAudio() {
-  try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    setupAudioAnalysis();
-    window.addEventListener('beforeunload', cleanup);
-  } catch (err) {
-    showError('Microphone access required. Please allow access and refresh.');
-    console.error('Audio initialization error:', err);
+class VoiceAvatar {
+  constructor() {
+    this.initThreeJS();
+    this.initAudio();
+    this.loadModel();
+    this.setupControls();
+    this.lastUpdate = 0;
+    this.currentVolume = 0;
+    this.isSpeaking = false;
   }
-}
 
-function setupAudioAnalysis() {
-  audioContext = new AudioContext();
-  const source = audioContext.createMediaStreamSource(mediaStream);
-  analyser = audioContext.createAnalyser();
-  
-  analyser.fftSize = AUDIO_CONFIG.FFT_SIZE;
-  source.connect(analyser);
-  
-  const bufferLength = analyser.fftSize;
-  const dataArray = new Uint8Array(bufferLength);
-  let smoothing = 0;
-  let silentFrames = 0;
+  initThreeJS() {
+    this.scene = new THREE.Scene();
+    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, canvas: document.querySelector('#visualization') });
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.camera.position.z = 2;
+  }
 
-  function analyzeAudio() {
-    analyser.getByteTimeDomainData(dataArray);
+  async loadModel() {
+    const loader = new THREE.GLTFLoader();
+    this.model = await loader.loadAsync('https://cdn.glitch.global/3d-models/robot-avatar.glb');
+    this.avatar = this.model.scene;
+    this.scene.add(this.avatar);
+    this.morphTargets = this.avatar.children[0].morphTargetDictionary;
+    this.initialMorph = this.avatar.children[0].morphTargetInfluences;
+  }
+
+  async initAudio() {
+    this.recognizer = speechCommands.create('BROWSER_FFT');
+    await this.recognizer.ensureModelLoaded();
     
-    // Calculate RMS from time domain data
-    let sumSquares = 0;
-    for (let i = 0; i < bufferLength; i++) {
-      const sample = (dataArray[i] - 128) / 128;
-      sumSquares += sample * sample;
-    }
-    const rms = Math.sqrt(sumSquares / bufferLength);
+    this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    this.audioContext = new AudioContext();
+    this.analyser = this.audioContext.createAnalyser();
+    this.analyser.fftSize = 2048;
     
-    // Apply smoothing
-    smoothing = smoothing * AUDIO_CONFIG.SMOOTHING_FACTOR + 
-               rms * (1 - AUDIO_CONFIG.SMOOTHING_FACTOR);
+    const source = this.audioContext.createMediaStreamSource(this.stream);
+    source.connect(this.analyser);
+    
+    this.startAnalysis();
+  }
 
-    // State transition logic
-    if (smoothing > AUDIO_CONFIG.RMS_THRESHOLD) {
-      silentFrames = 0;
-      setAvatarState(AVATAR_STATES.TALKING);
-    } else {
-      if (++silentFrames >= AUDIO_CONFIG.SILENT_FRAMES_THRESHOLD) {
-        setAvatarState(AVATAR_STATES.IDLE);
-      }
+  startAnalysis() {
+    this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+    this.analysisWorker = new Worker('audio-processor.js');
+    
+    this.analysisWorker.onmessage = ({ data }) => {
+      this.currentVolume = data.volume;
+      this.updateVisuals(data);
+      this.detectSpeech(data);
+    };
+
+    const process = () => {
+      this.analyser.getByteFrequencyData(this.dataArray);
+      this.analysisWorker.postMessage(this.dataArray);
+      requestAnimationFrame(process);
+    };
+    
+    process();
+  }
+
+  detectSpeech({ energies }) {
+    const sensitivity = document.getElementById('sensitivity').value;
+    const prediction = this.recognizer.recognize(energies);
+    
+    if (prediction.score > sensitivity && !this.isSpeaking) {
+      this.startSpeaking();
+    } else if (prediction.score <= sensitivity && this.isSpeaking) {
+      this.stopSpeaking();
+    }
+  }
+
+  startSpeaking() {
+    this.isSpeaking = true;
+    this.avatar.children[0].morphTargetInfluences[this.morphTargets.mouthOpen] = 0.5;
+  }
+
+  stopSpeaking() {
+    this.isSpeaking = false;
+    this.avatar.children[0].morphTargetInfluences[this.morphTargets.mouthOpen] = 0;
+  }
+
+  updateVisuals({ frequencies }) {
+    const now = Date.now();
+    if (now - this.lastUpdate < 16) return;
+    
+    // Update progress ring
+    const circle = document.getElementById('progressCircle');
+    const circumference = 2 * Math.PI * 45;
+    circle.style.strokeDasharray = `${circumference * this.currentVolume} ${circumference}`;
+
+    // Update 3D model animation
+    if (this.avatar) {
+      this.avatar.rotation.y += 0.005;
+      this.avatar.position.y = Math.sin(now * 0.002) * 0.1;
     }
 
-    requestAnimationFrame(analyzeAudio);
+    this.renderer.render(this.scene, this.camera);
+    this.lastUpdate = now;
   }
 
-  analyzeAudio();
-}
-
-function showError(message) {
-  errorDiv.textContent = message;
-  errorDiv.style.display = 'block';
-}
-
-function cleanup() {
-  if (mediaStream) {
-    mediaStream.getTracks().forEach(track => track.stop());
-  }
-  if (audioContext) {
-    audioContext.close();
+  setupControls() {
+    window.addEventListener('resize', () => {
+      this.camera.aspect = window.innerWidth / window.innerHeight;
+      this.camera.updateProjectionMatrix();
+      this.renderer.setSize(window.innerWidth, window.innerHeight);
+    });
   }
 }
 
-// Initialize on user interaction
-window.addEventListener('click', async () => {
-  if (!mediaStream) {
-    await initializeAudio();
-  }
-  if (audioContext && audioContext.state === 'suspended') {
-    await audioContext.resume();
-  }
+// Initialize with user interaction
+document.addEventListener('click', async () => {
+  const avatar = new VoiceAvatar();
+  window.avatar = avatar; // For debugging
+  document.getElementById('status').textContent = 'System Active';
 });
 
-// Initial setup
-initializeAudio();
+// Web Worker code (audio-processor.js)
+const workerCode = () => {
+  self.onmessage = (event) => {
+    const data = event.data;
+    let sum = data.reduce((a, b) => a + b, 0);
+    const volume = Math.min(1, sum / data.length / 255);
+    
+    const energies = Array.from({ length: 43 }, (_, i) => {
+      const start = Math.floor(i * data.length / 43);
+      const end = Math.floor((i + 1) * data.length / 43);
+      return data.slice(start, end).reduce((a, b) => a + b, 0) / (end - start);
+    });
+
+    self.postMessage({ volume, energies });
+  };
+};
+
+const blob = new Blob([`(${workerCode.toString()})()`], { type: 'text/javascript' });
+const audioProcessorURL = URL.createObjectURL(blob);
 </script>
 </body>
 </html>
