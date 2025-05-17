@@ -3,219 +3,167 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI-Powered Voice Avatar</title>
+<title>Voice Activated Avatar</title>
 <style>
-  :root {
-    --primary-color: #00ff88;
-    --background-color: #1a1a1a;
-  }
-
-  body {
-    margin: 0;
-    overflow: hidden;
-    background: var(--background-color);
-    font-family: Arial, sans-serif;
-  }
-
-  #container {
-    position: relative;
-    width: 100vw;
-    height: 100vh;
+  body, html {
+    margin: 0; 
+    padding: 0; 
+    height: 100%; 
+    background: #111;
     display: flex;
     justify-content: center;
     align-items: center;
+    overflow: hidden;
   }
 
-  #visualization {
+  .avatar-container {
+    position: relative;
+    width: min(90vmin, 600px);
+    height: min(90vmin, 600px);
+  }
+
+  .avatar-image {
     position: absolute;
     width: 100%;
     height: 100%;
+    object-fit: contain;
+    opacity: 0;
+    transition: opacity 0.2s ease-in-out;
   }
 
-  .control-panel {
+  .active {
+    opacity: 1;
+  }
+
+  #permissionPrompt {
     position: fixed;
     top: 20px;
-    right: 20px;
-    background: rgba(0, 0, 0, 0.8);
-    padding: 15px;
-    border-radius: 10px;
     color: white;
-    backdrop-filter: blur(5px);
-  }
-
-  .progress-ring {
-    position: absolute;
-    width: 110%;
-    height: 110%;
-    stroke-width: 2;
-    fill: none;
-    stroke: var(--primary-color);
-    opacity: 0.3;
+    background: #333;
+    padding: 15px;
+    border-radius: 8px;
+    display: none;
   }
 </style>
 </head>
 <body>
-<div id="container">
-  <canvas id="visualization"></canvas>
-  <div class="control-panel">
-    <h3>Voice Controls</h3>
-    <label>Sensitivity: <input type="range" id="sensitivity" min="0" max="1" step="0.1" value="0.5"></label>
-    <div id="status">Initializing...</div>
+  <div class="avatar-container">
+    <img id="idleAvatar" class="avatar-image active" src="https://i.ibb.co/chqZCvGC/idle.png" alt="Idle Avatar">
+    <img id="talkingAvatar" class="avatar-image" src="https://i.ibb.co/Jw5PDXWp/talking.png" alt="Talking Avatar">
   </div>
-  <svg class="progress-ring">
-    <circle id="progressCircle" cx="50%" cy="50%" r="45%"/>
-  </svg>
-</div>
-
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.18.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/speech-commands@0.5.7/dist/speech-commands.min.js"></script>
+  <div id="permissionPrompt">Click anywhere to enable microphone</div>
 
 <script>
-const VOICE_PARAMS = {
-  SMOOTHING: 0.92,
-  MIN_DURATION: 150,
-  VOLUME_MULTIPLIER: 2.5
-};
-
 class VoiceAvatar {
   constructor() {
-    this.initThreeJS();
-    this.initAudio();
-    this.loadModel();
-    this.setupControls();
-    this.lastUpdate = 0;
-    this.currentVolume = 0;
-    this.isSpeaking = false;
-  }
-
-  initThreeJS() {
-    this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, canvas: document.querySelector('#visualization') });
-    this.renderer.setSize(window.innerWidth, window.innerHeight);
-    this.renderer.setPixelRatio(window.devicePixelRatio);
-    this.camera.position.z = 2;
-  }
-
-  async loadModel() {
-    const loader = new THREE.GLTFLoader();
-    this.model = await loader.loadAsync('https://cdn.glitch.global/3d-models/robot-avatar.glb');
-    this.avatar = this.model.scene;
-    this.scene.add(this.avatar);
-    this.morphTargets = this.avatar.children[0].morphTargetDictionary;
-    this.initialMorph = this.avatar.children[0].morphTargetInfluences;
-  }
-
-  async initAudio() {
-    this.recognizer = speechCommands.create('BROWSER_FFT');
-    await this.recognizer.ensureModelLoaded();
+    this.idleImg = document.getElementById('idleAvatar');
+    this.talkingImg = document.getElementById('talkingAvatar');
+    this.permissionPrompt = document.getElementById('permissionPrompt');
     
-    this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    this.audioContext = null;
+    this.analyser = null;
+    this.isTalking = false;
+    this.silentFrames = 0;
+    
+    this.init();
+  }
+
+  async init() {
+    this.preloadImages();
+    this.showPermissionPrompt();
+    this.addEventListeners();
+  }
+
+  preloadImages() {
+    new Image().src = this.idleImg.src;
+    new Image().src = this.talkingImg.src;
+  }
+
+  showPermissionPrompt() {
+    if (location.protocol === 'https:') {
+      this.permissionPrompt.style.display = 'block';
+    }
+  }
+
+  addEventListeners() {
+    document.addEventListener('click', () => this.initializeAudio());
+    window.addEventListener('beforeunload', () => this.cleanup());
+  }
+
+  async initializeAudio() {
+    try {
+      this.permissionPrompt.style.display = 'none';
+      
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      this.setupAudioAnalysis(stream);
+    } catch (error) {
+      console.error('Audio access error:', error);
+      this.permissionPrompt.textContent = 'Microphone access required - please refresh and allow access';
+      this.permissionPrompt.style.display = 'block';
+    }
+  }
+
+  setupAudioAnalysis(stream) {
     this.audioContext = new AudioContext();
+    const source = this.audioContext.createMediaStreamSource(stream);
+    
     this.analyser = this.audioContext.createAnalyser();
     this.analyser.fftSize = 2048;
-    
-    const source = this.audioContext.createMediaStreamSource(this.stream);
     source.connect(this.analyser);
     
     this.startAnalysis();
   }
 
   startAnalysis() {
-    this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
-    this.analysisWorker = new Worker('audio-processor.js');
+    const buffer = new Uint8Array(this.analyser.fftSize);
+    let smoothedVolume = 0;
     
-    this.analysisWorker.onmessage = ({ data }) => {
-      this.currentVolume = data.volume;
-      this.updateVisuals(data);
-      this.detectSpeech(data);
+    const processAudio = () => {
+      this.analyser.getByteTimeDomainData(buffer);
+      
+      // Calculate RMS volume
+      const rms = Math.sqrt(
+        buffer.reduce((acc, val) => acc + Math.pow(val - 128, 2), 0) / buffer.length
+      ) / 128;
+
+      // Apply exponential smoothing
+      smoothedVolume = Math.max(rms, smoothedVolume * 0.85);
+      
+      this.updateAvatarState(smoothedVolume);
+      requestAnimationFrame(processAudio);
     };
 
-    const process = () => {
-      this.analyser.getByteFrequencyData(this.dataArray);
-      this.analysisWorker.postMessage(this.dataArray);
-      requestAnimationFrame(process);
-    };
-    
-    process();
+    processAudio();
   }
 
-  detectSpeech({ energies }) {
-    const sensitivity = document.getElementById('sensitivity').value;
-    const prediction = this.recognizer.recognize(energies);
+  updateAvatarState(volume) {
+    const THRESHOLD = 0.04;
+    const HYSTERESIS = 0.02;
     
-    if (prediction.score > sensitivity && !this.isSpeaking) {
-      this.startSpeaking();
-    } else if (prediction.score <= sensitivity && this.isSpeaking) {
-      this.stopSpeaking();
+    if (volume > THRESHOLD + HYSTERESIS && !this.isTalking) {
+      this.setTalkingState(true);
+    } else if (volume < THRESHOLD - HYSTERESIS && this.isTalking) {
+      this.setTalkingState(false);
     }
   }
 
-  startSpeaking() {
-    this.isSpeaking = true;
-    this.avatar.children[0].morphTargetInfluences[this.morphTargets.mouthOpen] = 0.5;
+  setTalkingState(talking) {
+    this.isTalking = talking;
+    this.idleImg.classList.toggle('active', !talking);
+    this.talkingImg.classList.toggle('active', talking);
   }
 
-  stopSpeaking() {
-    this.isSpeaking = false;
-    this.avatar.children[0].morphTargetInfluences[this.morphTargets.mouthOpen] = 0;
-  }
-
-  updateVisuals({ frequencies }) {
-    const now = Date.now();
-    if (now - this.lastUpdate < 16) return;
-    
-    // Update progress ring
-    const circle = document.getElementById('progressCircle');
-    const circumference = 2 * Math.PI * 45;
-    circle.style.strokeDasharray = `${circumference * this.currentVolume} ${circumference}`;
-
-    // Update 3D model animation
-    if (this.avatar) {
-      this.avatar.rotation.y += 0.005;
-      this.avatar.position.y = Math.sin(now * 0.002) * 0.1;
+  cleanup() {
+    if (this.audioContext) {
+      this.audioContext.close();
     }
-
-    this.renderer.render(this.scene, this.camera);
-    this.lastUpdate = now;
-  }
-
-  setupControls() {
-    window.addEventListener('resize', () => {
-      this.camera.aspect = window.innerWidth / window.innerHeight;
-      this.camera.updateProjectionMatrix();
-      this.renderer.setSize(window.innerWidth, window.innerHeight);
-    });
   }
 }
 
-// Initialize with user interaction
-document.addEventListener('click', async () => {
-  const avatar = new VoiceAvatar();
-  window.avatar = avatar; // For debugging
-  document.getElementById('status').textContent = 'System Active';
+// Initialize avatar when DOM is loaded
+document.addEventListener('DOMContentLoaded', () => {
+  new VoiceAvatar();
 });
-
-// Web Worker code (audio-processor.js)
-const workerCode = () => {
-  self.onmessage = (event) => {
-    const data = event.data;
-    let sum = data.reduce((a, b) => a + b, 0);
-    const volume = Math.min(1, sum / data.length / 255);
-    
-    const energies = Array.from({ length: 43 }, (_, i) => {
-      const start = Math.floor(i * data.length / 43);
-      const end = Math.floor((i + 1) * data.length / 43);
-      return data.slice(start, end).reduce((a, b) => a + b, 0) / (end - start);
-    });
-
-    self.postMessage({ volume, energies });
-  };
-};
-
-const blob = new Blob([`(${workerCode.toString()})()`], { type: 'text/javascript' });
-const audioProcessorURL = URL.createObjectURL(blob);
 </script>
 </body>
 </html>
