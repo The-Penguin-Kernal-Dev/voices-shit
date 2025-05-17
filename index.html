@@ -1,182 +1,144 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Voice Activated Avatar</title>
-<style>
-  body, html {
-    margin: 0; padding: 0; height: 100%; 
-    background: #111; 
-    display: flex; 
-    justify-content: center; 
-    align-items: center;
-    overflow: hidden;
-  }
-  .avatar-container {
-    position: relative;
-    width: 100vmin;
-    height: 100vmin;
-  }
-  .avatar-image {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    opacity: 0;
-    transition: opacity 0.15s cubic-bezier(0.4, 0, 0.2, 1);
-    will-change: opacity;
-  }
-  .active {
-    opacity: 1;
-  }
-  #error {
-    display: none;
-    position: fixed;
-    top: 20px;
-    color: white;
-    background: #c00;
-    padding: 15px;
-    border-radius: 5px;
-    max-width: 80%;
-    text-align: center;
-  }
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voice-Activated Avatar</title>
+  <style>
+    * { box-sizing: border-box; }
+    body, html {
+      margin: 0; padding: 0;
+      height: 100%; width: 100%;
+      background: #111;
+      color: #eee;
+      font-family: sans-serif;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+    }
+    #avatar-container {
+      flex: 1;
+      display: flex; align-items: center; justify-content: center;
+    }
+    img {
+      max-width: 100vw;
+      max-height: 100vh;
+      transition: opacity 0.1s ease-in-out;
+    }
+    #controls {
+      position: absolute;
+      top: 10px; right: 10px;
+      background: rgba(0,0,0,0.5);
+      padding: 8px; border-radius: 4px;
+    }
+    #controls label { font-size: 0.9em; }
+    #controls input[type="range"] { width: 100px; }
+    #meter {
+      margin-top: 4px;
+      width: 100px; height: 6px;
+      background: #444;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    #meter-fill {
+      height: 100%;
+      width: 0%;
+      background: #0f0;
+      transition: width 0.08s;
+    }
+    #start-btn, #fs-btn {
+      margin: 4px; padding: 4px 8px; font-size: 0.9em;
+      background: #222; color: #eee; border: 1px solid #555; border-radius: 3px;
+      cursor: pointer;
+    }
+  </style>
 </head>
 <body>
-  <div class="avatar-container">
-    <img id="idleAvatar" class="avatar-image active" src="https://i.ibb.co/chqZCvGC/idle.png" alt="Idle Avatar" />
-    <img id="talkingAvatar" class="avatar-image" src="https://i.ibb.co/Jw5PDXWp/talking.png" alt="Talking Avatar" />
+
+  <div id="controls">
+    <button id="start-btn">Start Mic</button>
+    <button id="fs-btn">Fullscreen</button>
+    <div>
+      <label for="threshold">Threshold:</label>
+      <input type="range" id="threshold" min="10" max="100" value="40" />
+      <span id="threshold-label">40</span>
+    </div>
+    <div id="meter"><div id="meter-fill"></div></div>
   </div>
-  <div id="error"></div>
+
+  <div id="avatar-container">
+    <img id="avatar" src="https://i.ibb.co/chqZCvGC/idle.png" alt="Avatar" />
+  </div>
 
 <script>
-// Configuration
-const AUDIO_CONFIG = {
-  FFT_SIZE: 1024,          // Reduced for faster processing
-  SAMPLE_RATE: 44100,
-  SMOOTHING_FACTOR: 0.65,  // Faster response to changes
-  RMS_THRESHOLD: 0.025,    // Adjusted threshold
-  SILENT_FRAMES_THRESHOLD: 4, // Faster state reversion
-  MIN_VOICE_DURATION: 40   // Reduced minimum duration
-};
+(() => {
+  const avatar = document.getElementById('avatar');
+  const idleImg = "https://i.ibb.co/chqZCvGC/idle.png";
+  const talkingImg = "https://i.ibb.co/Jw5PDXWp/talking.png";
 
-// State management
-let currentState = 'idle';
-let lastStateChange = 0;
-let mediaStream = null;
-let audioContext = null;
-let analyser = null;
-let animationFrameId = null;
+  const startBtn = document.getElementById('start-btn');
+  const fsBtn = document.getElementById('fs-btn');
+  const threshInput = document.getElementById('threshold');
+  const threshLabel = document.getElementById('threshold-label');
+  const meterFill = document.getElementById('meter-fill');
 
-const idleAvatar = document.getElementById('idleAvatar');
-const talkingAvatar = document.getElementById('talkingAvatar');
-const errorDiv = document.getElementById('error');
+  let audioContext, analyser, dataArray;
+  let smoothing = 0;
+  const smoothingFactor = 0.8;
+  let silentFrames = 0;
+  const silentFramesThreshold = 10;
 
-// Preload images and warm-up transitions
-function preloadAndPrepare() {
-  const preloader = new Image();
-  preloader.src = talkingAvatar.src;
-  preloader.onload = () => {
-    idleAvatar.style.contentVisibility = 'auto';
-    talkingAvatar.style.contentVisibility = 'auto';
-  };
-}
-preloadAndPrepare();
+  threshInput.addEventListener('input', () => {
+    threshLabel.textContent = threshInput.value;
+  });
 
-function setAvatarState(newState) {
-  if (newState === currentState) return;
-  
-  const now = performance.now();
-  if (now - lastStateChange < AUDIO_CONFIG.MIN_VOICE_DURATION) return;
-  
-  lastStateChange = now;
-  currentState = newState;
-  
-  idleAvatar.classList.toggle('active', newState === 'idle');
-  talkingAvatar.classList.toggle('active', newState === 'talking');
-}
+  fsBtn.addEventListener('click', () => {
+    document.documentElement.requestFullscreen().catch(() => {});
+  });
 
-async function initializeAudio() {
-  try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({ 
-      audio: { 
-        noiseSuppression: false,
-        echoCancellation: false 
-      } 
-    });
-    setupAudioAnalysis();
-  } catch (err) {
-    showError('Microphone access required. Please allow access and refresh.');
-    console.error('Audio initialization error:', err);
-  }
-}
+  function detectVoice() {
+    analyser.getByteFrequencyData(dataArray);
+    let sum = dataArray.reduce((a,v) => a + v, 0);
+    const average = sum / dataArray.length;
 
-function setupAudioAnalysis() {
-  audioContext = new AudioContext({ latencyHint: 'interactive' });
-  const source = audioContext.createMediaStreamSource(mediaStream);
-  analyser = audioContext.createAnalyser();
-  
-  analyser.fftSize = AUDIO_CONFIG.FFT_SIZE;
-  analyser.smoothingTimeConstant = 0.4;
-  source.connect(analyser);
-  
-  const bufferLength = analyser.fftSize;
-  const dataArray = new Uint8Array(bufferLength);
-  let smoothedVolume = 0;
+    // update meter
+    meterFill.style.width = Math.min(1, average/128) * 100 + '%';
 
-  function processAudio() {
-    analyser.getByteTimeDomainData(dataArray);
-    
-    // Optimized RMS calculation
-    let sumSquares = 0;
-    const scale = 1 / (128 * bufferLength);
-    for (let i = 0; i < bufferLength; i += 2) { // Skip every other sample
-      const sample = dataArray[i] - 128;
-      sumSquares += sample * sample;
+    smoothing = smoothing * smoothingFactor + average * (1 - smoothingFactor);
+    const threshold = Number(threshInput.value);
+
+    if (smoothing > threshold) {
+      avatar.src = talkingImg;
+      silentFrames = 0;
+    } else {
+      silentFrames++;
+      if (silentFrames > silentFramesThreshold) {
+        avatar.src = idleImg;
+      }
     }
-    const rms = Math.sqrt(sumSquares * scale);
-    
-    // Aggressive smoothing for faster response
-    smoothedVolume = Math.max(rms, smoothedVolume * AUDIO_CONFIG.SMOOTHING_FACTOR);
-
-    // Immediate state management
-    if (smoothedVolume > AUDIO_CONFIG.RMS_THRESHOLD) {
-      setAvatarState('talking');
-    } else if (performance.now() - lastStateChange > 50) {
-      setAvatarState('idle');
-    }
-
-    animationFrameId = requestAnimationFrame(processAudio);
+    requestAnimationFrame(detectVoice);
   }
 
-  processAudio();
-}
-
-function showError(message) {
-  errorDiv.textContent = message;
-  errorDiv.style.display = 'block';
-}
-
-function cleanup() {
-  if (animationFrameId) cancelAnimationFrame(animationFrameId);
-  if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
-  if (audioContext) audioContext.close();
-}
-
-// User interaction handling
-window.addEventListener('click', async () => {
-  if (!mediaStream) {
-    await initializeAudio();
-  }
-  if (audioContext?.state === 'suspended') {
-    await audioContext.resume();
-  }
-});
-
-window.addEventListener('beforeunload', cleanup);
+  startBtn.addEventListener('click', () => {
+    startBtn.disabled = true;
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(stream => {
+        audioContext = new AudioContext();
+        const source = audioContext.createMediaStreamSource(stream);
+        analyser = audioContext.createAnalyser();
+        source.connect(analyser);
+        analyser.fftSize = 512;
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+        detectVoice();
+      })
+      .catch(err => {
+        alert('❌ Microphone access was denied.');
+        console.error(err);
+      });
+  });
+})();
 </script>
+
 </body>
 </html>
+
