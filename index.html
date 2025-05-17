@@ -32,7 +32,7 @@ navigator.mediaDevices.getUserMedia({ audio: true })
     const dataArray = new Uint8Array(analyser.frequencyBinCount);
     let smoothing = 0;
     const smoothingFactor = 0.8;
-    const threshold = 40;
+    const threshold = 30;
     let silentFrames = 0;
     const silentFramesThreshold = 10;
 
